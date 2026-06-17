@@ -497,6 +497,93 @@ def annotate_8k(filing: dict) -> dict:
     return filing
 
 
+# ── SIC peer lookup ────────────────────────────────────────────────────────────
+
+def _cik_to_ticker_map() -> dict[str, str]:
+    """Return {cik_str: ticker} from EDGAR company_tickers.json."""
+    resp = _get_safe(f"{EDGAR_BASE}/files/company_tickers.json")
+    if resp is None:
+        return {}
+    return {str(v["cik_str"]): v["ticker"] for v in resp.json().values()}
+
+
+def fetch_sic_peers(sic: str, max_peers: int = 20) -> list[dict]:
+    """
+    Return companies sharing the given SIC code by scraping EDGAR's browse page.
+    Each entry: {cik, cik_plain, company_name, state, sic, ticker}.
+    """
+    url = (
+        f"{EDGAR_BASE}/cgi-bin/browse-edgar"
+        f"?action=getcompany&SIC={sic}&type=10-K"
+        f"&dateb=&owner=include&count={min(max_peers + 10, 100)}&search_text="
+    )
+    r = _get_safe(url)
+    if r is None:
+        return []
+
+    peers = []
+    if _BS4:
+        soup = BeautifulSoup(r.text, "lxml")
+        table = soup.find("table", class_="tableFile2")
+        if table:
+            for row in table.find_all("tr")[1:]:
+                cells = row.find_all("td")
+                if len(cells) < 2:
+                    continue
+                cik_link = cells[0].find("a")
+                if not cik_link:
+                    continue
+                cik_int = re.sub(r"\D", "", cik_link.get_text(strip=True))
+                name = cells[1].get_text(strip=True)
+                state = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+                peers.append({
+                    "cik": cik_int.zfill(10),
+                    "cik_plain": cik_int,
+                    "company_name": name,
+                    "state": state,
+                })
+    else:
+        for m in re.finditer(
+            r'CIK=(\d+)[^"]*">\s*\1\s*</a>.*?<a[^>]+>([^<]+)</a>.*?<td[^>]*>([^<]*)</td>',
+            r.text, re.DOTALL,
+        ):
+            peers.append({
+                "cik": m.group(1).zfill(10),
+                "cik_plain": m.group(1),
+                "company_name": m.group(2).strip(),
+                "state": m.group(3).strip(),
+            })
+
+    ticker_map = _cik_to_ticker_map()
+    for p in peers:
+        p["ticker"] = ticker_map.get(p["cik_plain"], "")
+        p["sic"] = sic
+
+    return peers[:max_peers]
+
+
+def summarize_xbrl_annual(xbrl: dict) -> dict:
+    """
+    Collapse full XBRL time-series to the single most-recent annual (10-K) value
+    per metric. Returns {metric: {value, period_end, unit}}.
+    """
+    out = {}
+    for metric, data in xbrl.items():
+        annual = [
+            p for p in data.get("data_points", [])
+            if p.get("form") in {"10-K", "20-F", "10-K/A"}
+        ]
+        if not annual:
+            continue
+        best = max(annual, key=lambda p: p.get("end", ""))
+        out[metric] = {
+            "value": best.get("val"),
+            "period_end": best.get("end"),
+            "unit": data.get("unit"),
+        }
+    return out
+
+
 # ── Main orchestration ─────────────────────────────────────────────────────────
 
 def run(ticker: str, output_dir: Path, max_filings: int):

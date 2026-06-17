@@ -34,6 +34,8 @@ Claude Code — add to .claude/settings.json in your project:
     edgar_risk_factors      Item 1A from 10-K filings
     edgar_proxy_data        Exec comp, board, say-on-pay, shareholder proposals
     edgar_filings_index     Full list of 10-K/10-Q/8-K/DEF 14A filings (5 years)
+    edgar_sic_peers         Companies sharing the target's SIC industry code
+    edgar_peer_financials   Latest annual financials for SIC-matched peers
 """
 
 import json
@@ -48,9 +50,11 @@ from edgar_tool import (
     extract_proxy_sections,
     extract_risk_factors,
     fetch_filing_text,
+    fetch_sic_peers,
     fetch_xbrl_facts,
     get_company_info,
     parse_filings,
+    summarize_xbrl_annual,
 )
 
 mcp = FastMCP("edgar")
@@ -162,6 +166,88 @@ def edgar_filings_index(ticker: str) -> str:
         return json.dumps(summary, indent=2)
     except Exception as e:
         return f"Error fetching filings index: {e}"
+
+
+@mcp.tool()
+def edgar_sic_peers(ticker: str, max_peers: int = 20) -> str:
+    """
+    Return a list of public companies that share the same SIC industry code as
+    the target company. Each entry includes CIK, ticker (when available),
+    company name, state of incorporation, and SIC. Useful for identifying a
+    peer group before pulling comparative financials.
+    max_peers controls how many peers to return (default 20, max ~100).
+    """
+    try:
+        meta, _ = get_company_info(ticker)
+        sic = meta.get("sic", "")
+        if not sic:
+            return "Error: no SIC code found for this company"
+        peers = fetch_sic_peers(sic, max_peers + 1)
+        ticker_up = ticker.upper()
+        peers = [p for p in peers if p.get("ticker", "").upper() != ticker_up][:max_peers]
+        return json.dumps({
+            "target": {
+                "ticker": ticker_up,
+                "sic": sic,
+                "sic_description": meta.get("sic_description", ""),
+            },
+            "peer_count": len(peers),
+            "peers": peers,
+        }, indent=2)
+    except Exception as e:
+        return f"Error fetching SIC peers: {e}"
+
+
+@mcp.tool()
+def edgar_peer_financials(ticker: str, max_peers: int = 10) -> str:
+    """
+    Return the most recent annual XBRL financial figures for SIC-peer companies
+    of the target ticker. Covers the same 20+ metrics as edgar_financial_metrics
+    (Revenue, NetIncome, TotalAssets, Cash, etc.) but returns only the latest
+    annual value per metric — not the full time-series — so responses stay
+    manageable. Peers without a known ticker are skipped.
+    max_peers sets how many peers to process (default 10).
+    """
+    try:
+        meta, _ = get_company_info(ticker)
+        sic = meta.get("sic", "")
+        if not sic:
+            return "Error: no SIC code found for this company"
+
+        ticker_up = ticker.upper()
+        candidates = fetch_sic_peers(sic, max_peers + 10)
+        peers = [
+            p for p in candidates
+            if p.get("ticker", "").upper() != ticker_up and p.get("ticker")
+        ][:max_peers]
+
+        results = {}
+        for peer in peers:
+            peer_ticker = peer["ticker"]
+            try:
+                xbrl = fetch_xbrl_facts(peer["cik"])
+                results[peer_ticker] = {
+                    "company_name": peer["company_name"],
+                    "cik": peer["cik_plain"],
+                    "state": peer.get("state", ""),
+                    "financials": summarize_xbrl_annual(xbrl),
+                }
+            except Exception:
+                results[peer_ticker] = {
+                    "company_name": peer["company_name"],
+                    "cik": peer["cik_plain"],
+                    "error": "failed to fetch financials",
+                }
+
+        return json.dumps({
+            "target_ticker": ticker_up,
+            "sic": sic,
+            "sic_description": meta.get("sic_description", ""),
+            "peer_count": len(results),
+            "peers": results,
+        }, indent=2)
+    except Exception as e:
+        return f"Error fetching peer financials: {e}"
 
 
 # ── Run ────────────────────────────────────────────────────────────────────────
