@@ -16,7 +16,7 @@ import json
 import re
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -43,7 +43,7 @@ HEADERS = {
 }
 
 # Five years back from today
-CUTOFF = datetime.utcnow() - timedelta(days=5 * 365)
+CUTOFF = datetime.now(timezone.utc) - timedelta(days=5 * 365)
 
 # XBRL tags to harvest (metric_name → possible tag names, tried in order)
 XBRL_METRICS = {
@@ -650,12 +650,12 @@ def run(ticker: str, output_dir: Path, max_filings: int):
 
     # ── Build output documents ────────────────────────────────────────────────
 
-    now_iso = datetime.utcnow().isoformat() + "Z"
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     financials = {
         "generated_at": now_iso,
         "period_from": CUTOFF.strftime("%Y-%m-%d"),
-        "period_to": datetime.utcnow().strftime("%Y-%m-%d"),
+        "period_to": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "company": meta,
         "filings_index": {
             "10-K":    [{"date": f["date"], "accession_number": f["accession_number"]} for f in filing_map["10-K"]],
